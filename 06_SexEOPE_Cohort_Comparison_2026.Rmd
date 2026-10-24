@@ -1,0 +1,437 @@
+---
+title: "EOPE & Sex Project - EWAS eoPRED & Pathology - Comparison"
+author: "Hannah Illing"
+date: "`r format(Sys.time(), '%Y %B %d')`"
+#Date created: 2025,02,14
+output: 
+  html_document:
+    keep_md: yes
+    toc: true  
+    toc_depth: 4
+    toc_float: 
+      collapsed: true 
+      smooth_scroll: true
+---
+
+## 0.0 Introduction and Set-up
+
+In this script I will compare the results of the EWAS's in the 450K and SPAH datasets for eoPRED score.
+
+NOTE: When I first wrote these scripts I called the 450K Dataset the 'Discovery Cohort' and the SPAH Dataset the 'Validation Cohort'. You may still see objects named this way.
+
+### 0.1 Packages
+
+```{r packages}
+
+library(here)
+library(tidyverse)
+library(ggrepel)
+library(ggpubr)
+library(forestplot)
+library(cowplot)
+library(ggh4x)
+library(missMethyl)
+
+#load the 450K probe information
+probeInfo_450k <- as.data.frame(cbind(
+  IlluminaHumanMethylation450kanno.ilmn12.hg19::Locations, 
+  IlluminaHumanMethylation450kanno.ilmn12.hg19::Other, 
+  IlluminaHumanMethylation450kanno.ilmn12.hg19::Manifest))
+probeInfo_450k$probeID <-rownames(probeInfo_450k)
+
+chrXprobes_450k <- probeInfo_450k %>% filter (chr == "chrX") 
+chrYprobes_450k <- probeInfo_450k %>% filter (chr == "chrY") 
+remove(probeInfo_450k)
+
+#load the EPIC probe information
+probeInfo <- readRDS("//fs/teams/RobinsonLab/Hannah/05_Projects/SPAH/E. Sex and Environment Project [abandon]/02_Outputs/02_Variability/hg38_b5_EPIC_probeinfo.rds")
+probeInfo <- probeInfo %>% mutate(Start_hg38 = as.numeric(Start_hg38))
+
+chrXprobes_EPIC <- probeInfo %>% filter(chr == "chrX")
+chrYprobes_EPIC <- probeInfo %>% filter(chr == "chrY")
+remove(probeInfo)
+
+set.seed(4815)
+theme_set(theme_minimal())
+theme_update(
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(), 
+  axis.line = element_line(colour = "black"),
+  axis.title.x = element_text(size = 16),
+  axis.title.y = element_text(size = 16),
+  axis.text = element_text(size=12),
+  plot.title = element_text(hjust=0.5, size = 14, face ="bold"),
+  legend.position="none"
+  )
+
+```
+
+
+### 0.2 Load Linear Modelling Data
+
+```{r data}
+
+disc_lm_eopred_fx <- readRDS(here::here("02_Outputs/04_450K_EWAS/lm_eopred2_fx.RDS"))
+disc_lm_eopred_mx <- readRDS(here::here("02_Outputs/04_450K_EWAS/lm_eopred2_mx.RDS"))
+disc_lm_eopred_my <- readRDS(here::here("02_Outputs/04_450K_EWAS/lm_eopred2_my.RDS"))
+
+val_lm_eopred_fx <- readRDS(here::here("02_Outputs/05_SPAH_EWAS/lm_eopred2_fx.RDS"))
+val_lm_eopred_mx <- readRDS(here::here("02_Outputs/05_SPAH_EWAS/lm_eopred2_mx.RDS"))
+val_lm_eopred_my <- readRDS(here::here("02_Outputs/05_SPAH_EWAS/lm_eopred2_my.RDS"))
+
+```
+
+## 1.0 Comparison 
+
+1. Plot the regression coefficients in the two cohorts against one another
+2. Are any of the hits replicated? (p-value<0.05 & delta-beta in the same direction?)
+
+### 1.1 Females X chr
+
+```{r eopred-fx}
+
+table(disc_lm_eopred_fx$probeID %in% val_lm_eopred_fx$probeID) #8350 probes overlap
+
+#combine 
+colnames(val_lm_eopred_fx) <- paste0(colnames(val_lm_eopred_fx),"_val")
+colnames(val_lm_eopred_fx)
+
+lm_eopred_fx <- disc_lm_eopred_fx %>%
+  inner_join(val_lm_eopred_fx, by=c("probeID"="probeID_val"))
+dim(lm_eopred_fx)
+cor.test(lm_eopred_fx$delB, lm_eopred_fx$delB_val) #R=0.4929
+
+chrX_xx_rep_hits <- lm_eopred_fx %>% filter(fdr_val<0.05 & delB_val>0.25 & p.value<0.05)
+dim(chrX_xx_rep_hits)
+
+```
+
+### 1.2 Males X chr
+
+```{r eopred-mx}
+
+table(disc_lm_eopred_mx$probeID %in% val_lm_eopred_mx$probeID) #8350 probes overlap
+
+#combine 
+colnames(val_lm_eopred_mx) <- paste0(colnames(val_lm_eopred_mx),"_val")
+colnames(val_lm_eopred_mx)
+
+lm_eopred_mx <- disc_lm_eopred_mx %>%
+  inner_join(val_lm_eopred_mx, by=c("probeID"="probeID_val"))
+dim(lm_eopred_mx)
+cor.test(lm_eopred_mx$delB, lm_eopred_mx$delB_val) #R=0.6623
+
+chrX_xy_rep_hits <- lm_eopred_mx %>%
+                          filter(fdr_val<0.05 & abs(delB_val)>0.25 & p.value<0.05 |
+                                   fdr<0.05 & abs(delB)>0.25 & p.value_val<0.05)
+dim(chrX_xy_rep_hits)
+
+```
+
+### 1.3 Y chr
+
+```{r eopred-my}
+
+table(disc_lm_eopred_my$probeID %in% val_lm_eopred_my$probeID) #198 probes overlap
+
+#combine 
+colnames(val_lm_eopred_my) <- paste0(colnames(val_lm_eopred_my),"_val")
+colnames(val_lm_eopred_my)
+
+lm_eopred_my <- disc_lm_eopred_my %>%
+  inner_join(val_lm_eopred_my, by=c("probeID"="probeID_val"))
+dim(lm_eopred_my)
+cor.test(lm_eopred_my$delB, lm_eopred_my$delB_val) #R=0.7314
+
+chrY_rep_hits <- lm_eopred_my %>% filter(delB>0.25 & fdr<0.05)
+dim(chrY_rep_hits)
+
+```
+
+```{r compare-models}
+
+sup_fig5d <- lm_eopred_fx %>%
+  ggplot(aes(x=delB, y=delB_val))+
+  geom_point(alpha=0.5)+
+  stat_cor()+
+  labs(x=expression(paste(Delta*beta, " eoPRED score 450K")),
+       y=expression(paste(Delta*beta, " eoPRED score SPAH")))
+
+sup_fig5e <- lm_eopred_mx %>%
+  ggplot(aes(x=delB, y=delB_val))+
+  geom_point(alpha=0.5)+
+  stat_cor()+
+  labs(x=expression(paste(Delta*beta, " eoPRED score 450K")),
+       y=expression(paste(Delta*beta, " eoPRED score SPAH")))
+
+sup_fig5f <- lm_eopred_my %>%
+  ggplot(aes(x=delB, y=delB_val))+
+  geom_point(alpha=0.5)+
+  stat_cor()+
+  labs(x=expression(paste(Delta*beta, " eoPRED score 450K")),
+       y=expression(paste(Delta*beta, " eoPRED score SPAH")))
+
+sup_fig5def <- plot_grid(sup_fig5d, sup_fig5e, sup_fig5f,nrow=1,
+                         labels = c("D.","E.","F."))
+sup_fig5def
+
+sup_fig5abc <- readRDS(here::here("02_Outputs/04_450K_EWAS/450K_compare_models.rds"))
+
+sup_fig5 <- plot_grid(sup_fig5abc, sup_fig5def, nrow=2)
+
+ggsave("Sup_Figure_5.png", plot = sup_fig5, path = here::here("02_Outputs/06_Cohort_Comparison"), width = 13, height =10, device = "png")
+
+
+```
+
+
+## 2.0 Enrichment Analysis
+
+### 2.1 gometh
+
+Look at what gene ontology terms are enriched in the CpGs differentially methylated by eoPRED score using the `missMethyl` package function `gometh`. It isn't very useful though for the X and Y chromosomes.
+
+```{r go-analysis}
+
+hits_fx <- (lm_eopred_fx %>%
+    filter(sign(delB) == sign(delB_val)) %>%
+      filter (p.value < 0.05 & p.value_val < 0.05) %>%
+      filter(fdr<0.05 | fdr_val<0.05) %>%
+      filter(abs(delB)>0.1 | abs(delB_val)>0.1))$probeID
+length(hits_fx)
+
+hits_mx <- (lm_eopred_mx %>%
+    filter(sign(delB) == sign(delB_val)) %>%
+      filter (p.value < 0.05 & p.value_val < 0.05) %>%
+      filter(fdr<0.05 | fdr_val<0.05) %>%
+      filter(abs(delB)>0.1 | abs(delB_val)>0.1))$probeID
+length(hits_mx)
+
+hits_x <- unique(c(hits_fx, hits_mx))
+length(hits_x)
+
+go_x <- gometh(sig.cpg = hits_x,
+                    all.cpg = val_lm_eopred_fx$probeID,
+                    array.type = "EPIC")
+
+go_x <- go_x %>% mutate(GOterm = rownames(go_x)) %>% as_tibble %>% arrange(FDR)
+go_x %>% filter(FDR < 0.05) %>% nrow() #0 significantly associated terms
+go_x[1:10,]
+
+
+go_my <- gometh(sig.cpg = hits_my,
+                    all.cpg = lm_eopred_my$probeID,
+                    array.type = "EPIC")
+
+go_my <- go_my %>% mutate(GOterm = rownames(go_my)) %>% as_tibble %>% arrange(FDR)
+go_my %>% filter(FDR < 0.05) %>% nrow() #0 significantly associated terms
+go_my[1:10,]
+
+```
+
+### 2.2 TFBS
+
+chromHMM consensus from Roadmap, original ID: EPIC.hg19.REMC.chromHMM.tsv.gz
+	sequence context group
+		CpGs associated with consensus TFBS from Cistrome/ENCODE
+		EPIC probes associated with tissue-specific methylation
+		CpGs associated with consensus histone modifications from Cistrome/ENCODE
+		CpG island (Island, S_Shore, N_Shelf, N_Shore, S_Shelf) using CGIposition column in EPIC.hg38.manifest
+
+```{r tfbs-analysis}
+
+library(sesame)
+sesameDataCache()
+
+sesame::KYCG_listDBGroups("EPIC")
+
+dbs <- c("KYCG.EPIC.chromHMM.20211020",
+         "KYCG.EPIC.TFBSconsensus.20211013",
+         "KYCG.EPIC.HMconsensus.20221013",
+         "KYCG.EPIC.CGI.20210713")
+
+gene_ea <- testEnrichment(hits_x, databases=dbs, platform = "EPIC")
+KYCG_plotDot(gene_ea)
+KYCG_plotEnrichAll(gene_ea)
+
+gene_ea_my <- testEnrichment(hits_my, databases=dbs, platform = "EPIC")
+KYCG_plotDot(gene_ea_my)
+KYCG_plotEnrichAll(gene_ea_my)
+
+write.csv(gene_ea, here::here("02_Outputs/06_Cohort_Comparison/enrichment_analysis.csv"), row.names =F)
+
+```
+
+## 3.0 Replicated Hits Plots
+
+```{r prep-for-plot}
+
+#load beta-values
+#discovery cohort
+disc_pDat <- readRDS(here::here("02_Outputs/01_450K_Proc/pDat_filt.RDS"))
+disc_betas <- readRDS(here::here("02_Outputs/01_450K_Proc/betas_adjdas_filt.RDS"))
+dim(disc_pDat) #354 samples
+dim(disc_betas) #x354
+## Remove samples with chromosome abnormalities
+disc_pDat <- disc_pDat %>% filter(!Sample_ID %in% c("GSM2589548","GSM2674422"))
+dim(disc_pDat) #352
+disc_betas <- disc_betas [,disc_pDat$Sample_ID]
+dim(disc_betas) #352
+
+#validation cohort
+val_pDat <- readRDS(here::here("02_Outputs/02_SPAH_Proc/val_cohort_metadata.RDS"))
+val_betas <- readRDS(here::here("02_Outputs/02_SPAH_Proc/val_cohort_betas_adjdas.RDS"))
+dim(val_pDat) #493 samples
+dim(val_betas) #x493
+
+rep_hits <- unique(c(chrX_xx_rep_hits$probeID, chrX_xy_rep_hits$probeID, chrY_rep_hits$probeID))
+length(rep_hits)
+
+probe_levels <- c("cg22683858", "cg19321437","cg08559914","cg10840597","cg02212907",
+"cg22844265","cg05071823","cg19227523","cg00422452","cg26359388",
+"cg16520030","cg20978230","cg07924363","cg05672930","cg17660627")
+
+probe_labs <- c("cg22683858\nAmbiguous", "cg19321437\nBoth sexes",
+                "cg08559914\nSex-differential","cg10840597\nBoth sexes",
+                "cg02212907\nSex-differential", "cg22844265\nAmbiguous",
+                "cg05071823\nBoth sexes","cg19227523\nSex-differential",
+                "cg00422452\nSex-differential","cg26359388\nBoth sexes",
+                "cg16520030\nSex-differential","cg20978230\nBoth sexes",
+                "cg07924363\nSex-differential",
+                "cg05672930\nY chr","cg17660627\nY chr")
+
+names(probe_labs) <- probe_levels
+  
+```
+
+```{r plot}
+
+disc_pDat_xx <- disc_pDat %>% filter(DNAme_Sex == "XX")
+
+disc_betas[rownames(disc_betas) %in% chrYprobes_450k$probeID, 
+                         colnames(disc_betas) %in% disc_pDat_xx$Sample_ID] <- NA
+
+disc_hits <- disc_betas[rep_hits, ,drop=F] %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column(var="Sample_ID") %>%
+  pivot_longer(-Sample_ID, names_to ="probeID",values_to="Beta")%>%
+  left_join(disc_pDat, by="Sample_ID") %>%
+  mutate(probeID = factor(probeID, levels = probe_levels))
+
+sup_fig7a <- disc_hits %>%
+  ggplot(aes(x=EOPE, y=Beta, color=DNAme_Sex))+
+  geom_point(alpha=0.5)+
+  geom_smooth(method="lm",se=F)+
+  scale_color_manual(values=c("#bf4e52","#407799"))+
+  ylim(0,1)+
+  xlim(0,1)+
+  theme(strip.text = element_text(hjust=0.5, size=16),
+        axis.text.x = element_text(size=12),
+        axis.text.y = element_text(size=12))+
+  labs(x="eoPRED score", y= expression(paste("DNAme (",beta,")")), color="Sex")+
+  facet_wrap2(~probeID, ncol=5, labeller =  labeller(probeID = probe_labs))
+
+###
+
+val_pDat_xx <- val_pDat %>% filter(Sex_Predic == "XX")
+
+val_betas[rownames(val_betas) %in% chrYprobes_EPIC$probeID, 
+                         colnames(val_betas) %in% val_pDat_xx$rgset_colnames] <- NA
+
+val_hits <- val_betas[rep_hits, ,drop=F] %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column(var="rgset_colnames") %>%
+  pivot_longer(-rgset_colnames, names_to ="probeID",values_to="Beta")%>%
+  left_join(val_pDat, by="rgset_colnames") %>%
+  mutate(probeID = factor(probeID, levels = probe_levels))
+
+sup_fig7b <- val_hits %>%
+  ggplot(aes(x=EOPE, y=Beta, color=Sex_Predic))+
+  geom_point(alpha=0.5)+
+  geom_smooth(method="lm",se=F)+
+  scale_color_manual(values=c("#bf4e52","#407799"))+
+  ylim(0,1)+
+  xlim(0,1)+
+  theme(strip.text = element_text(hjust=0.5, size=16),
+        axis.text.x = element_text(size=12),
+        axis.text.y = element_text(size=12),
+        legend.position="bottom",
+        legend.text = element_text(size=16))+
+  labs(x="eoPRED score", y= expression(paste("DNAme (",beta,")")), color="Sex")+
+  facet_wrap2(~probeID, ncol=5, labeller =  labeller(probeID = probe_labs))
+
+sup_fig7 <- plot_grid(NULL,sup_fig7a, NULL,sup_fig7b,
+                      nrow=4, labels=c("450K Dataset","","SPAH Dataset",""),
+                      rel_heights = c(0.01,1,0.01,1))
+
+ggsave("Sup_Figure7_2026.svg", plot = sup_fig7, path = here::here("02_Outputs/06_Cohort_Comparison"), width = 17, height =16, device = "svg")
+
+
+```
+
+##4.0 Save Objects
+
+```{r prepare-to-save}
+
+lm_eopred_fx_save <- lm_eopred_fx %>%
+  filter(fdr_val<0.05 & fdr<0.05)%>%
+  # filter(sign(delB) == sign(delB_val))%>%
+  # filter(abs(delB)>0.1 & abs(delB_val)>0.1)%>%
+  dplyr::select(probeID, p.value, fdr, delB,
+                p.value_val, fdr_val, delB_val) %>%
+  dplyr::rename(
+    `450K_pval` = p.value,
+    `450K_fdr` = fdr,
+    `450K_delB` = delB,
+    SPAH_pval = p.value_val,
+    SPAH_fdr = fdr_val,
+    SPAH_delB = delB_val) %>%
+  left_join((chrXprobes_EPIC %>% dplyr::select(probeID, chr,pos, UCSC_RefGene_Name,
+                                               GencodeBasicV12_NAME, Regulatory_Region)))
+dim(lm_eopred_fx_save) #97 (36) probes
+
+lm_eopred_mx_save <- lm_eopred_mx %>%
+  filter(fdr_val<0.05 & fdr<0.05)%>%
+  # filter(sign(delB) == sign(delB_val))%>%
+  # filter(abs(delB)>0.1 & abs(delB_val)>0.1)%>%
+dplyr::select(probeID, p.value, fdr, delB,
+                p.value_val, fdr_val, delB_val) %>%
+  dplyr::rename(
+    `450K_pval` = p.value,
+    `450K_fdr` = fdr,
+    `450K_delB` = delB,
+    SPAH_pval = p.value_val,
+    SPAH_fdr = fdr_val,
+    SPAH_delB = delB_val) %>%
+  left_join((chrXprobes_EPIC %>% dplyr::select(probeID, chr,pos, UCSC_RefGene_Name,
+                                               GencodeBasicV12_NAME, Regulatory_Region)))
+dim(lm_eopred_mx_save) #736 (203) probes
+
+lm_eopred_my_save <- lm_eopred_my %>%
+  filter(fdr_val<0.05 & fdr<0.05)%>%
+  # filter(sign(delB) == sign(delB_val))%>%
+  # filter(abs(delB)>0.1 & abs(delB_val)>0.1)%>%
+dplyr::select(probeID, p.value, fdr, delB,
+                p.value_val, fdr_val, delB_val) %>%
+  dplyr::rename(
+    `450K_pval` = p.value,
+    `450K_fdr` = fdr,
+    `450K_delB` = delB,
+    SPAH_pval = p.value_val,
+    SPAH_fdr = fdr_val,
+    SPAH_delB = delB_val) %>%
+  left_join((chrYprobes_EPIC %>% dplyr::select(probeID, chr,pos, UCSC_RefGene_Name,
+                                               GencodeBasicV12_NAME, Regulatory_Region)))
+dim(lm_eopred_my_save) #12 (6) probes
+
+```
+
+```{r save}
+
+write.csv(lm_eopred_fx_save, here::here("02_Outputs/06_Cohort_Comparison/lm_eopred_fx_save.csv"), row.names=F)
+write.csv(lm_eopred_mx_save, here::here("02_Outputs/06_Cohort_Comparison/lm_eopred_mx_save.csv"), row.names=F)
+write.csv(lm_eopred_my_save, here::here("02_Outputs/06_Cohort_Comparison/lm_eopred_my_save.csv"), row.names=F)
+
+```

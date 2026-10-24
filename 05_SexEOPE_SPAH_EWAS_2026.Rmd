@@ -1,0 +1,460 @@
+---
+title: "EOPE & Sex Project - EWAS eoPRED & Pathology SPAH"
+author: "Hannah Illing"
+date: "`r format(Sys.time(), '%Y %B %d')`"
+#Date created: 2025,02,11
+output: 
+  html_document:
+    keep_md: yes
+    toc: true  
+    toc_depth: 4
+    toc_float: 
+      collapsed: true 
+      smooth_scroll: true
+---
+
+## 0.0 Introduction and Set-up
+
+In this script I will perform an EWAS on the X and Y chromosome probes for eoPRED score and placental pathology in the SPAH cohort.
+
+### 0.1 Packages
+
+```{r packages, warning=F, message=F}
+
+library(here)
+library(tidyverse)
+library(limma)
+library(biobroom)
+library(lumi)
+library(cowplot)
+library(ggrepel)
+library(UMtools)
+library(ggpubr)
+
+#load the EPIC probe information
+probeInfo <- readRDS("//fs/teams/RobinsonLab/Hannah/05_Projects/SPAH/E. Sex and Environment Project [abandon]/02_Outputs/02_Variability/hg38_b5_EPIC_probeinfo.rds")
+probeInfo <- probeInfo %>% mutate(Start_hg38 = as.numeric(Start_hg38))
+
+chrXprobes_EPIC <- probeInfo %>% filter(chr == "chrX")
+chrYprobes_EPIC <- probeInfo %>% filter(chr == "chrY")
+remove(probeInfo)
+
+set.seed(4815)
+theme_set(theme_minimal())
+theme_update(
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(), 
+  axis.line = element_line(colour = "black"),
+  axis.title.x = element_text(size = 16),
+  axis.title.y = element_text(size = 16),
+  legend.position="none"
+  )
+
+```
+
+### 0.2 Load Data
+
+```{r data}
+
+val_pDat <- readRDS(here::here("02_Outputs/02_SPAH_Proc/val_cohort_metadata.RDS"))
+val_pDat <- val_pDat %>% filter(!is.na(PE_GA_state))
+val_betas <- readRDS(here::here("02_Outputs/02_SPAH_Proc/val_cohort_betas_adjdas.RDS"))
+dim(val_pDat) #493 samples
+dim(val_betas) #x491
+
+#XX and XY metadata
+val_pDat_f <- val_pDat %>% filter(Sex_Predic == "XX")
+val_pDat_m <- val_pDat %>% filter(Sex_Predic == "XY")%>%
+  filter(!is.na(ga_continuous)) #remove samples with missing covariate (GA) info
+nrow(val_pDat_f) #217
+nrow(val_pDat_m) #274
+
+#select the sex chromosomes
+# female X chr probes
+betas_fx <- na.omit(val_betas [rownames(val_betas) %in% chrXprobes_EPIC$probeID, val_pDat_f$rgset_colnames])
+mvals_fx <- lumi::beta2m(betas_fx)
+dim(mvals_fx) #16070 x 217
+
+# male X chr probes
+betas_mx <- na.omit(val_betas [rownames(val_betas) %in% chrXprobes_EPIC$probeID, val_pDat_m$rgset_colnames])
+mvals_mx <- lumi::beta2m(betas_mx)
+dim(mvals_mx) #16070 x 274
+
+# male Y chr probes
+betas_my <- na.omit(val_betas [rownames(val_betas) %in% chrYprobes_EPIC$probeID, val_pDat_m$rgset_colnames])
+mvals_my <- lumi::beta2m(betas_my)
+dim(mvals_my) #289 x 274
+
+```
+
+### 0.3 Linear Modelling Function
+
+```{r lm-functions}
+
+linear_modelling <- function(betas,mvals,model){
+#run model on m values & calculate empirical Bayesian statistics
+  fit<- lmFit(mvals, model) %>% eBayes()
+  td <- biobroom::tidy.MArrayLM(fit)
+  
+  #calculate delta beta
+  fit_B <- lmFit(betas, model) %>% eBayes()
+  td <- td %>% mutate(delB =
+                        (biobroom::tidy.MArrayLM(fit_B))$estimate)
+  
+  #calculate SE of regression coefficients
+  se_coef <- sqrt(fit_B$s2.post) * fit_B$stdev.unscaled
+  se_coef <- se_coef %>% as.data.frame() %>%
+    rownames_to_column(var="probeID") %>%
+    pivot_longer(-"probeID", names_to= "term", values_to="se")
+  
+  #multiple test correct
+  td <- td %>% 
+    dplyr::rename(probeID = gene) %>% #biobroom assumes tested genes, not CpGs, rename
+    group_by(term) %>%
+    mutate(fdr = p.adjust(p.value, method="fdr")) %>%
+    ungroup() %>%
+    as.data.frame()
+  
+  td <- td %>%
+    left_join(se_coef, by=c("probeID" = "probeID", "term"="term")) %>%
+    mutate(ConfInt_95 = delB + 1.96*se,
+           ConfInt_5 = delB - 1.96*se)
+  return(td)
+}
+
+lm_significant_hits <- function(td){
+#significant hits 
+sig_hits <- matrix(c(
+  nrow(td %>% filter(fdr<0.05)),
+  nrow(td %>% filter(fdr<0.05 & abs(delB) > 0.05)),
+  nrow(td %>% filter(fdr<0.05 & abs(delB) > 0.1)),
+  nrow(td %>% filter(fdr<0.05 & abs(delB) > 0.25)),
+  nrow(td %>% filter(fdr<0.05 & abs(delB) > 0.5)),
+  nrow(td %>% filter(fdr<0.01)),
+  nrow(td %>% filter(fdr<0.01 & abs(delB) > 0.05)),
+  nrow(td %>% filter(fdr<0.01 & abs(delB) > 0.1)),
+  nrow(td %>% filter(fdr<0.01 & abs(delB) > 0.25)),
+  nrow(td %>% filter(fdr<0.01 & abs(delB) > 0.5))
+  ),ncol=2)
+
+colnames(sig_hits) <- c("FDR < 0.05", "FDR < 0.01")
+rownames(sig_hits) <- c("delB >0", "delB >0.05", "delB >0.1", "delB >0.25", "delB >0.5")
+sig_hits <-as.table(sig_hits)
+
+return(sig_hits)
+}
+
+```
+
+## 1.0 Linear Models
+
+In my linear models when I correct for cell-composition I will include Syncytiotrophoblasts, Stromal, Endothelial, and nRBC. I excluded Trophoblasts/Cytotrophoblast because it was highly correlated (R2 >= 0.80, cut-off based on PMID: 31304696) with the proportion of Syncytiotrophoblasts (made up the larger proportion of samples). Syncytiotrophoblasts were correlated with Stromal and Endothelial cell-proportions but not with a R^2 >= 0.80. I excluded Hofbauer because it made up less than 1% of most samples. I knew this from my previous work with this cohort in my Pathology project.
+
+
+Models:
+
+i) DNAme ~ eoPRED score 
+ii) DNAme ~ eoPRED score + GA + ancestry
+iii) DNAme ~ eoPRED score + GA + ancestry + cell composition
+
+```{r eopred-fx}
+
+mod_eopred1_fx <- model.matrix(~ EOPE, val_pDat_f,row.names=T)
+mod_eopred2_fx <- model.matrix(~ EOPE+Prob_European+Prob_African+ga_continuous, val_pDat_f,row.names=T)
+mod_eopred3_fx <- model.matrix(~ EOPE+Prob_European+Prob_African+ga_continuous+
+                                 Syncytiotrophoblast+Stromal+Endothelial+nRBC, val_pDat_f,row.names=T)
+
+head(mod_eopred3_fx) #check
+
+lm_eopred1_fx <-linear_modelling (betas_fx,mvals_fx,mod_eopred1_fx) %>% filter (term == "EOPE")
+lm_eopred2_fx <-linear_modelling (betas_fx,mvals_fx,mod_eopred2_fx) %>% filter (term == "EOPE")
+lm_eopred3_fx <-linear_modelling (betas_fx,mvals_fx,mod_eopred3_fx) %>% filter (term == "EOPE")
+
+head(lm_eopred2_fx) #check
+
+#hits?
+lm_significant_hits(lm_eopred1_fx)
+lm_significant_hits(lm_eopred2_fx)
+lm_significant_hits(lm_eopred3_fx)
+
+```
+
+```{r eopred-mx}
+
+mod_eopred1_mx <- model.matrix(~ EOPE, val_pDat_m,row.names=T)
+mod_eopred2_mx <- model.matrix(~ EOPE+Prob_European+Prob_African+ga_continuous, val_pDat_m,row.names=T)
+mod_eopred3_mx <- model.matrix(~ EOPE+Prob_European+Prob_African+ga_continuous+
+                                 Syncytiotrophoblast+Stromal+Endothelial+nRBC, val_pDat_m,row.names=T)
+
+head(mod_eopred3_mx) #check
+
+lm_eopred1_mx <-linear_modelling (betas_mx,mvals_mx,mod_eopred1_mx) %>% filter (term == "EOPE")
+lm_eopred2_mx <-linear_modelling (betas_mx,mvals_mx,mod_eopred2_mx) %>% filter (term == "EOPE")
+lm_eopred3_mx <-linear_modelling (betas_mx,mvals_mx,mod_eopred3_mx) %>% filter (term == "EOPE")
+
+head(lm_eopred2_mx) #check
+
+#hits?
+lm_significant_hits(lm_eopred1_mx)
+lm_significant_hits(lm_eopred2_mx)
+lm_significant_hits(lm_eopred3_mx)
+
+```
+
+```{r eopred-my}
+
+lm_eopred1_my <-linear_modelling (betas_my,mvals_my,mod_eopred1_mx) %>% filter (term == "EOPE")
+lm_eopred2_my <-linear_modelling (betas_my,mvals_my,mod_eopred2_mx) %>% filter (term == "EOPE")
+lm_eopred3_my <-linear_modelling (betas_my,mvals_my,mod_eopred3_mx) %>% filter (term == "EOPE")
+
+head(lm_eopred2_my) #check
+
+#hits?
+lm_significant_hits(lm_eopred1_my)
+lm_significant_hits(lm_eopred2_my)
+lm_significant_hits(lm_eopred3_my)
+
+```
+
+## 2.0 Plots
+
+```{r eopred-vps}
+
+eopred_plot_fx <- lm_eopred2_fx %>%
+  ggplot(aes(x=delB, y=-log10(fdr), color=case_when(
+    fdr < 0.05 & abs(delB) > 0.25 ~ "DMC",
+    fdr < 0.05 ~ "FDR<0.05",
+    .default = "Not Significant"))) +
+  geom_point(alpha=0.8, size=2.25)+
+  geom_hline(yintercept = -log10(0.05), color="grey22", linetype="dashed")+
+  geom_vline(xintercept=c(-0.25,0.25), color="grey22", linetype="dashed")+
+  scale_color_manual(values=c("DMC" ="black","FDR<0.05"="grey55","Not Significant" ="grey88"))+
+  labs(x=expression(paste(Delta*beta, " eoPRED score")),y="-log(FDR)",color="",
+       title = "X chr (XX)")+
+  theme(legend.position="none",
+        plot.subtitle = element_text(hjust=0.5, size = 13),
+        plot.title = element_text(hjust=0.5, size = 14, face ="bold"),
+        axis.title = element_text(size=14),
+        axis.text = element_text(size=12),
+        legend.title = element_text(size=12),
+        legend.text = element_text(size=10))+
+  # geom_text_repel(data=(lm_eopred2_fx %>% filter(fdr< 0.05 & abs(delB)>0.25)),
+  #                 aes(x=delB, y=-log10(fdr), label=probeID),
+  # show.legend=F, max.overlaps = Inf, size=4, min.segment.length=0)+
+  ylim(0,36)
+
+eopred_plot_mx <- lm_eopred2_mx %>%
+  ggplot(aes(x=delB, y=-log10(fdr), color=case_when(
+    fdr < 0.05 & abs(delB) > 0.25 ~ "DMC",
+    fdr < 0.05 ~ "FDR<0.05",
+    .default = "Not Significant"))) +
+  geom_point(alpha=0.8, size=2.25)+
+  geom_hline(yintercept = -log10(0.05), color="grey22", linetype="dashed")+
+  geom_vline(xintercept=c(-0.25,0.25), color="grey22", linetype="dashed")+
+  scale_color_manual(values=c("DMC" ="black","FDR<0.05"="grey55","Not Significant" ="grey88"))+
+  labs(x=expression(paste(Delta*beta, " eoPRED score")),y="-log(FDR)",color="",
+       title = "X chr (XY)")+
+  theme(legend.position="none",
+        plot.subtitle = element_text(hjust=0.5, size = 13),
+        plot.title = element_text(hjust=0.5, size = 14, face ="bold"),
+        axis.title = element_text(size=14),
+        axis.text = element_text(size=12),
+        legend.title = element_text(size=12),
+        legend.text = element_text(size=10))+
+  ylim(0,36)
+
+eopred_plot_my <- lm_eopred2_my %>%
+  ggplot(aes(x=delB, y=-log10(fdr), color=case_when(
+    fdr < 0.05 & abs(delB) > 0.25 ~ "DMC",
+    fdr < 0.05 ~ "FDR<0.05",
+    .default = "Not Significant"))) +
+  geom_point(alpha=0.8, size=2.25)+
+  geom_hline(yintercept = -log10(0.05), color="grey22", linetype="dashed")+
+  geom_vline(xintercept=c(-0.25,0.25), color="grey22", linetype="dashed")+
+  scale_color_manual(values=c("DMC" ="black","FDR<0.05"="grey55","Not Significant" ="grey88"))+
+  labs(x=expression(paste(Delta*beta, " eoPRED score")),y="-log(FDR)",color="",
+       title = "Y chr (XY)")+
+  theme(legend.position="none",legend.background=element_blank(),
+        legend.key.height = unit(0.5,'cm'), legend.key.width = unit(0.3,'cm'),
+        plot.subtitle = element_text(hjust=0.5, size = 13),
+        plot.title = element_text(hjust=0.5, size = 14, face ="bold"),
+        axis.title = element_text(size=14),
+        axis.text = element_text(size=12),
+        legend.title = element_text(size=12),
+        legend.text = element_text(size=10))+
+  ylim(0,36)
+
+eopred_vps <- plot_grid(NULL, NULL, NULL,
+                        eopred_plot_fx, eopred_plot_mx, eopred_plot_my,
+                        nrow=2, rel_heights=c(0.075,1))
+eopred_vps
+
+ggsave("eoPRED_volcano_plots.png", plot = eopred_vps, path = here::here("02_Outputs/05_SPAH_EWAS"), width = 12, height =6, device = "png")
+saveRDS(eopred_vps, here::here("02_Outputs/05_SPAH_EWAS/SPAH_Cohort_volcanoplots.rds"))
+
+```
+
+## 3.0 Hits
+
+
+```{r eopred-hits}
+
+eopred_hits_fx <- lm_eopred2_fx %>% filter(fdr<0.05 & abs(delB)>0.25)
+dim(eopred_hits_fx) #4
+eopred_hits_fx$probeID
+
+eopred_hits_mx <- lm_eopred2_mx %>% filter(fdr<0.05 & abs(delB)>0.25)
+dim(eopred_hits_mx) #44
+
+table(eopred_hits_fx$probeID %in% eopred_hits_mx$probeID) #1 overlap between groups
+
+#combine XX and XY information
+colnames(lm_eopred2_fx) <- paste0(colnames(lm_eopred2_fx),"_f")
+colnames(lm_eopred2_fx)
+lm_eopred2_x <- lm_eopred2_mx %>% left_join(lm_eopred2_fx, by=c("probeID"="probeID_f"))
+dim(lm_eopred2_x) #16070 x 21
+
+#How do the XX hits look in XY?
+lm_eopred2_x %>% filter(probeID %in% eopred_hits_fx$probeID)
+
+#identify which probes do not have overlapping delta-beta 95% CI between XX/XY
+lm_eopred2_x <- lm_eopred2_x %>%
+  mutate(Overlap_CI = case_when(
+    ConfInt_95_f < ConfInt_5 ~ F,
+    ConfInt_5_f > ConfInt_95 ~ F,
+    .default = T),
+    Same_Direction_CI = sign(delB) == sign(delB_f))
+
+table(lm_eopred2_x$Overlap_CI) #442
+
+#classify the hits using the criteria
+eopred_hits_x <- lm_eopred2_x %>%
+  filter(probeID %in% eopred_hits_mx$probeID |
+           probeID %in% eopred_hits_fx$probeID) %>%
+  mutate(Sex_specific_call = 
+           ifelse(probeID %in% eopred_hits_mx$probeID,
+             case_when(
+               Overlap_CI==F & p.value_f>=0.05 ~ "Sex Specific",
+               Overlap_CI==F & p.value_f<0.05 & Same_Direction_CI==T ~ "Sex Differential",
+               Overlap_CI==F & p.value_f<0.05 & Same_Direction_CI==F ~ "Sex Opposite",
+               Overlap_CI==T & p.value_f<0.05 ~ "Association in both sexes",
+               Overlap_CI==T & p.value_f>=0.05 ~ "Association in one sex"),
+             case_when(
+               Overlap_CI==F & p.value>=0.05 ~ "Sex Specific",
+               Overlap_CI==F & p.value<0.05 & Same_Direction_CI==T ~ "Sex Differential",
+               Overlap_CI==F & p.value<0.05 & Same_Direction_CI==F ~ "Sex Opposite",
+               Overlap_CI==T & p.value<0.05 ~ "Association in both sexes",
+               Overlap_CI==T & p.value>=0.05 ~ "Association in one sex")))
+table(eopred_hits_x$Sex_specific_call)
+
+
+```
+
+```{r eopred-hits-save}
+
+lm_eopred2_x_save <- eopred_hits_x %>%
+  dplyr::select(probeID, p.value, fdr, delB, ConfInt_5, ConfInt_95,
+                p.value_f, fdr_f, delB_f, ConfInt_5_f, ConfInt_95_f,
+                Overlap_CI, Same_Direction_CI, Sex_specific_call) %>%
+  dplyr::rename(
+    XY_pval = p.value,
+    XY_fdr = fdr,
+    XY_delB = delB,
+    XY_lowCI = ConfInt_5,
+    XY_highCI = ConfInt_95,
+    XX_pval = p.value_f,
+    XX_fdr = fdr_f,
+    XX_delB = delB_f,
+    XX_lowCI = ConfInt_5_f,
+    XX_highCI = ConfInt_95_f
+  ) %>%
+  left_join((chrXprobes_EPIC %>% dplyr::select(probeID, chr,pos, UCSC_RefGene_Name,
+                                               GencodeBasicV12_NAME, Regulatory_Region)))
+
+```
+
+### 3.1 Sex specific interaction test
+
+Run the linear model for eoPRED score on the X chromosome hits in all samples and test to see if the interaction term is significant for the hits (testing for sex-specific and sex-differential effects).
+
+```{r sex-specific-test}
+
+val_pDat_x <- val_pDat %>% filter(!is.na(ga_continuous))
+betas_x_hits <- val_betas[lm_eopred2_x_save$probeID,val_pDat_x$rgset_colnames]
+dim(betas_x_hits) #47 x 492
+mvals_x_hits <- lumi::beta2m(betas_x_hits)
+
+mod_x_hits <- model.matrix(~ EOPE*Sex_Predic+Prob_European+Prob_African+ga_continuous, val_pDat_x,row.names=T)
+
+head(mod_x_hits)
+
+lm_x_hits <-linear_modelling (betas_x_hits,mvals_x_hits,mod_x_hits) %>% filter (term == "EOPE:Sex_PredicXY")
+
+table((lm_x_hits %>% 
+  left_join(lm_eopred2_x_save))$Sex_specific_call, (lm_x_hits %>% 
+  left_join(lm_eopred2_x_save))$fdr<0.05)
+
+lm_eopred2_x_save <- lm_eopred2_x_save %>%
+  left_join((lm_x_hits %>%
+               dplyr::select(probeID, delB, fdr) %>%
+               dplyr::rename(Int_delB = delB,
+                             Int_fdr = fdr)), by="probeID")
+
+```
+
+
+### 3.2 Figure 3
+
+```{r fig-3}
+
+labs <- c("cg24865241\nAssociation in both sexes",
+          "cg07924363\nSex Differential",
+          "cg16667333\nXY Specific")
+names(labs) <- c("cg24865241", "cg07924363","cg16667333")
+
+eopred_hits_sp <- betas_x_hits[c("cg24865241","cg07924363","cg16667333"),] %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column(var="rgset_colnames")%>%
+  pivot_longer(-c(rgset_colnames),names_to="probeID", values_to = "Beta")%>%
+  left_join(val_pDat_x, by="rgset_colnames") %>%
+  mutate(probeID = factor(probeID, levels = c("cg24865241","cg07924363","cg16667333"))) %>%
+  ggplot(aes(x=EOPE, y=Beta, color=Sex_Predic))+
+  scale_color_manual(values=c("#bf4e52","#407799"))+
+  labs(x="eoPRED score", y=expression(paste("DNAme (",beta,")")), color="Sex")+
+  theme(legend.position="bottom",
+        axis.title = element_text(size=16),
+        axis.text = element_text(size=14),
+        legend.title = element_text(size=14),
+        legend.text = element_text(size=12),
+        strip.text = element_text(size=14))+
+  geom_point(alpha=0.5)+
+  geom_smooth(method="lm",se=T)+
+  facet_wrap(vars(probeID), labeller = labeller(probeID=labs))+
+  ylim(0,1)
+
+
+fig3 <- plot_grid(eopred_vps, NULL, eopred_hits_sp, nrow=3, labels=c("A.","","B."), rel_heights=c(1,0.1,1))
+ggsave("Figure3_2026.9.png", plot = fig3, path = here::here("02_Outputs/05_SPAH_EWAS"), width = 12, height =12, device = "png")
+
+```
+
+## 4.0 Save Objects
+
+```{r save}
+
+#fix before saving
+colnames(lm_eopred2_fx) <- colnames(lm_eopred2_mx)
+
+saveRDS(lm_eopred2_fx, here::here("02_Outputs/05_SPAH_EWAS/lm_eopred2_fx.RDS"))
+saveRDS(lm_eopred2_mx, here::here("02_Outputs/05_SPAH_EWAS/lm_eopred2_mx.RDS"))
+saveRDS(lm_eopred2_my, here::here("02_Outputs/05_SPAH_EWAS/lm_eopred2_my.RDS"))
+write.csv(lm_eopred2_x_save, here::here("02_Outputs/05_SPAH_EWAS/lm_eopred2_x_save.csv"), row.names=F)
+saveRDS(betas_x_hits, here::here("02_Outputs/05_SPAH_EWAS/betas_x_hits.RDS"))
+
+#cells adjusted models
+saveRDS(lm_eopred3_fx, here::here("02_Outputs/05_SPAH_EWAS/lm_eopred3_fx.RDS"))
+saveRDS(lm_eopred3_mx, here::here("02_Outputs/05_SPAH_EWAS/lm_eopred3_mx.RDS"))
+saveRDS(lm_eopred3_my, here::here("02_Outputs/05_SPAH_EWAS/lm_eopred3_my.RDS"))
+
+```

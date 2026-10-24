@@ -1,0 +1,715 @@
+---
+title: "EOPE & Sex Project - Processing of 450K Dataset"
+author: "Hannah Illing"
+date: "`r format(Sys.time(), '%Y %B %d')`"
+#Date created: 2025,02,07
+output: 
+  html_document:
+    keep_md: yes
+    toc: true  
+    toc_depth: 4
+    toc_float: 
+      collapsed: true 
+      smooth_scroll: true
+---
+
+## 1.0 Introduction
+
+The goal of this project is to identify eoPRED score associations with sex chromosome DNA methylation. I will use two datasets of placentas. The '450K Dataset' will consist of publicly available 450K array placental datasets with preeclampsia cases. 
+
+NOTE: When I first wrote these scripts I called the 450K Dataset the 'Discovery Cohort' and the SPAH Dataset the 'Validation Cohort'. You may still see objects named this way.
+
+### 1.1 Packages
+
+```{r packages, warning=F, message=F}
+
+library(here)
+library(tidyverse)
+library(minfi)
+library(lumi)
+library(planet)
+library(EpiDISH)
+library(ewastools)
+library(wateRmelon)
+library(ExperimentHub)
+library(mixOmics)
+library(ggrepel)
+
+probeInfo_450k <- as.data.frame(cbind(
+  IlluminaHumanMethylation450kanno.ilmn12.hg19::Locations, 
+  IlluminaHumanMethylation450kanno.ilmn12.hg19::Other, 
+  IlluminaHumanMethylation450kanno.ilmn12.hg19::Manifest))
+
+probeInfo_450k$probeID <-rownames(probeInfo_450k)
+chrXprobes <- probeInfo_450k %>% filter (chr == "chrX") #11232
+chrYprobes <- probeInfo_450k %>% filter (chr == "chrY") #416
+autoProbes <- probeInfo_450k %>% filter (!(chr %in% c("chrX", "chrY"))) #473864
+
+remove(probeInfo_450k)
+
+set.seed(4815)
+
+```
+
+### 1.2 Data
+
+Included datasets:
+
+-   GSE100197 (n=102)
+-   GSE103253 (n=82)
+-   GSE125605 (n=42)
+-   GSE75196 (n=24)
+-   GSE98224 (n=48) 
+-   GSE57767 (n=45)
+-   GSE73375 (n=36) 
+  
+`complete_mset.rds` is the **raw** Mset methylation data from all of the aforementioned datasets downloaded from GEO.
+
+```{r data}
+
+iciar_data_path <- "//fs/teams/RobinsonLab/Icíar/Projects/Aim2_SexPE/Data/00_Raw/"
+
+mset_all <- readRDS(paste0(iciar_data_path,"complete_mset.RDS"))
+dim(mset_all) #485512 x 401
+
+#get the phenotype data (pData)
+pDat_all <- as.data.frame(pData(mset_all))
+dim(pDat_all) #401 x 22
+
+#filter metadata to the correct datasets
+pDat_disc <- pDat_all %>%
+  filter(GEO_Dataset %in% c("GSE100197", "GSE103253", "GSE125605", "GSE75196", "GSE98224", "GSE57767" ,"GSE73375"))
+dim(pDat_disc) # 379
+
+#filter the mset 
+table(pDat_disc$Sample_ID %in% colnames(mset_all))
+mset <- mset_all [,pDat_disc$Sample_ID]
+dim(mset)
+
+#load the snps
+snps_all <- readRDS(paste0(iciar_data_path,"snps.RDS"))
+dim(snps_all) #65 x 419
+table(pDat_disc$Sample_ID %in% colnames(snps_all))
+
+#it's missing the snps for datasets GSE120981 and GSE103253
+#not available on GEO, I checked
+
+```
+
+## 2.0 Sample Checks
+
+-   check sample genotypes
+-   Index contamination
+-   Fluorescence intensity
+-   Sex check
+-   Intersample correlation
+-   Check cell composition
+
+### 2.1 Genotypes & Contamination
+
+```{r genotypes}
+
+#select the samples we have snp data for
+snp_samples <- pDat_disc %>%
+  filter(Sample_ID %in% colnames(snps_all)) %>%
+  filter(!GEO_Dataset == "GSE103253")
+dim(snp_samples) #297 samples (379-82)
+
+snps <- snps_all [,snp_samples$Sample_ID]
+all(snp_samples$Sample_ID == colnames(snps)) #T
+
+genotypes <- call_genotypes(snps)
+
+snp_samples <- snp_samples %>% mutate(Sample_Donors = enumerate_sample_donors(genotypes)) 
+n_distinct(snp_samples$Sample_Donors) #290 (7 duplicates!)
+
+#check which samples are being called the same genotype
+check_snp_agreement(genotypes, colnames(snps), colnames(snps))
+#GSM2674440, GSM2674492, and GSM2674493
+#GSM2674469, GSM2674488, and GSM2674489
+#GSM2674479, GSM2674490, and GSM2674491
+#GSM2674494 and GSM2674495
+
+#These are the technical replicate samples from GSE100197 (n=8)
+pDat_disc %>% filter(Condition == "Replicate")
+#Note that GSM2674494 and GSM2674495 are PM72 (47XX+13 case, eoPRED score=0.3)
+
+```
+
+```{r contamination}
+
+#use ewastools functions
+snp_samples <- snp_samples %>% 
+  mutate(prob_snp_outlier = colMeans(genotypes$outliers, na.rm = T),
+         prob_snp_outlier_logodds = snp_outliers(genotypes))
+
+snp_samples %>% 
+  ggplot(aes(x=Sample_ID, y=prob_snp_outlier, color=GEO_Dataset)) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position ="right")+
+  labs(x="Sample ID", y="Probability of contamination")+
+  geom_point()+
+  geom_hline(yintercept =0.2, linetype=2)+
+  geom_text_repel(data=(snp_samples %>% filter(prob_snp_outlier >0.2)),
+                  aes(x=Sample_ID, y=prob_snp_outlier, label=Sample_ID))
+
+snp_samples %>% 
+  ggplot(aes(x=Sample_ID, y=prob_snp_outlier_logodds, color=GEO_Dataset)) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position ="none")+
+  labs(x="Sample ID", y="LO Probability of contamination")+
+  geom_point()+
+  geom_hline(yintercept =-4, linetype=2)+
+  geom_text_repel(data=(snp_samples %>% filter(prob_snp_outlier_logodds >-4)),
+                  aes(x=Sample_ID, y=prob_snp_outlier_logodds, label=Sample_ID))
+
+table(snp_samples$prob_snp_outlier_logodds >-4) #32 samples!
+
+snp_samples <- snp_samples %>% mutate(Failed_contam = ifelse(prob_snp_outlier_logodds >-4,T,F))
+snp_samples <- snp_samples %>% dplyr::select(Sample_ID, prob_snp_outlier, prob_snp_outlier_logodds, Failed_contam)
+
+pDat_disc <- pDat_disc %>% left_join(snp_samples, by="Sample_ID")
+
+```
+
+### 2.2 Fluorescence Intensity
+
+```{r fluorescence}
+
+#in the next step I am pulling tables of meth/unmeth fluo intensities per probe (rows) for every sample
+meth <- getMeth(mset)
+unmeth <- getUnmeth(mset)
+
+intensity<- data.frame(
+  Sample_ID = c(colnames(meth)),
+  log2_median_meth = log2(colMedians(meth)), 
+  log2_median_unmeth = log2(colMedians(unmeth)),
+  mean_totalfluo = colMeans(meth+unmeth)) #total fluorescence = meth + unmeth
+
+pDat_disc <- pDat_disc %>% left_join(intensity, by="Sample_ID")
+
+#plot meth vs. unmeth (Illumina suggested plot and threshold)
+pDat_disc %>%
+  ggplot(aes(x=log2_median_meth, y=log2_median_unmeth, color=GEO_Dataset))+
+  geom_point()+
+  geom_abline(intercept = 10.5*2, slope = -1, col = 'black', linetype = 'dashed')+ #illumina guidelines
+  coord_cartesian(xlim=c(7.5,15), ylim=c(7.5,15))+
+  theme(legend.position="right")+
+  geom_text_repel(data=(pDat_disc %>% filter(log2_median_unmeth<11 &
+                                               log2_median_meth <10)),
+                  aes(x=log2_median_meth, y=log2_median_unmeth, label=Sample_ID))
+
+pDat_disc <- pDat_disc %>% mutate(Failed_intensity = ifelse(log2_median_unmeth<11.1 &
+                                               log2_median_meth <10.1, T,F))
+
+#total intensity
+upper_fluo <- mean(pDat_disc$mean_totalfluo) + 2*sd(pDat_disc$mean_totalfluo)
+lower_fluo <- mean(pDat_disc$mean_totalfluo) - 2*sd(pDat_disc$mean_totalfluo)
+
+pDat_disc %>%
+  ggplot(aes(x=Sample_ID, y=mean_totalfluo, color=GEO_Dataset))+
+  geom_point()+
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position="right")+
+  labs(x="Sample ID")+
+  # geom_label_repel (data = pDat_disc %>%
+  #                   filter(mean_totalfluo < lower_fluo),
+  #                   aes(x=Sample_ID, y=mean_totalfluo, label=Sample_ID),
+  #                   show.legend = FALSE,
+  #                   min.segment.length = 0)+
+  geom_hline(yintercept = upper_fluo, col = 'black', linetype = 'dashed')+
+  geom_hline(yintercept = lower_fluo, col = 'black', linetype = 'dashed')
+
+pDat_disc <- pDat_disc %>% mutate(Failed_totalintensity = ifelse(mean_totalfluo < lower_fluo,T,F))
+table(pDat_disc$Failed_totalintensity) #9 samples
+
+pDat_disc %>%
+  ggplot(aes(x=GEO_Dataset, y=mean_totalfluo, color=GEO_Dataset))+
+  geom_point(position=position_jitterdodge())+
+  geom_boxplot(alpha=0.5)+
+  labs(x="GEO Dataset")+
+  theme(legend.position="none")+
+  geom_hline(yintercept = upper_fluo, col = 'black', linetype = 'dashed')+
+  geom_hline(yintercept = lower_fluo, col = 'black', linetype = 'dashed')
+
+pDat_disc %>%
+  ggplot(aes(x=Row, y=mean_totalfluo, color=Row))+
+  geom_point(position=position_jitterdodge())+
+  geom_boxplot(alpha=0.5)+
+  labs(x="Row")+
+  theme(legend.position="none")+
+  geom_hline(yintercept = upper_fluo, col = 'black', linetype = 'dashed')+
+  geom_hline(yintercept = lower_fluo, col = 'black', linetype = 'dashed')
+
+```
+
+### 2.3 Sex-Check
+
+```{r sex-check}
+
+## Sex check - modified ewastools method
+# compute total XY and auto probe intensities (meth + unmeth) per sample/column
+chrX <- colMeans(meth[rownames(meth) %in% chrXprobes$probeID,] + unmeth[rownames(unmeth) %in% chrXprobes$probeID,])
+chrY <- colMeans(meth[rownames(meth) %in% chrYprobes$probeID,] + unmeth[rownames(unmeth) %in% chrYprobes$probeID,])
+auto <- colMeans(meth[rownames(meth) %in% autoProbes$probeID,] + unmeth[rownames(unmeth) %in% autoProbes$probeID,])
+
+# normalize XY to total auto intensity
+chrX <- chrX/auto
+chrY <- chrY/auto
+
+# add sex chr intensities to pDat 
+pDat_disc <- pDat_disc %>% mutate(chrX_nInt = chrX,
+                        chrY_nInt = chrY)
+
+female <- pDat_disc$Sex %in% c("Female")
+male <- pDat_disc$Sex %in% c("Male")
+
+# compute robust Hodges-Lehmann estimator for total intensities of XY probes
+X_int <- outer(pDat_disc$chrX_nInt[male], pDat_disc$chrX_nInt[female], "+") 
+X_int <- median(X_int, all())/2 #X chromosome intensity cutoff
+
+Y_int <- outer(pDat_disc$chrY_nInt[male], pDat_disc$chrY_nInt[female], "+") 
+Y_int <- median(X_int, all())/2 #Y chromosome intensity cutoff
+
+pDat_disc <- pDat_disc %>% 
+  mutate(DNAme_Sex = case_when(
+  chrX_nInt>=X_int & chrY_nInt<=Y_int~"XX",
+  chrX_nInt<=X_int & chrY_nInt>=Y_int~"XY",
+  .default = "NA"))
+
+table(pDat_disc$Sex, pDat_disc$DNAme_Sex) #1 mismatch
+
+pDat_disc <- pDat_disc %>% mutate(Sex_mismatch = ifelse(Sex =="Female" & DNAme_Sex =="XY",T,F))
+
+pDat_disc %>%
+  ggplot(aes(x=chrX_nInt, y=chrY_nInt, color=Sex)) + 
+  geom_point(size=3, alpha=0.4) +
+  labs(title="Normalized X and Y Chr Fluorescence Intensity \nColoured by Reported Sex",
+       y="Mean chrY/mean Autosomal Intensity",
+       x="Mean chrX/mean Autosomal Intensity",
+       color="Reported Sex") +
+  theme_bw()+
+  theme(plot.title= element_text(hjust=0.5), legend.position="right")+
+  scale_color_manual(values=c("#5647B2","#47B25E"),labels = c("XX","XY"))+
+  geom_label_repel (data = pDat_disc %>%
+                    filter(Sex_mismatch | Sample_ID == "GSM1944944"),
+                    aes(chrX_nInt,chrY_nInt, label=Sample_ID),
+                    show.legend = FALSE,
+                    min.segment.length = 0)+
+  geom_hline(yintercept = Y_int)+
+  geom_vline(xintercept = X_int)
+
+pDat_disc %>%
+  ggplot(aes(x=chrX_nInt, y=chrY_nInt, color=GEO_Dataset)) + 
+  geom_point(size=3, alpha=0.4) +
+  labs(title="Normalized X and Y Chr Fluorescence Intensity \nColoured by Reported Sex",
+       y="Mean chrY/mean Autosomal Intensity",
+       x="Mean chrX/mean Autosomal Intensity",
+       color="Dataset") +
+  theme_bw()+
+  theme(plot.title= element_text(hjust=0.5), legend.position="right")+
+  geom_label_repel (data = pDat_disc %>%
+                    filter(Sex_mismatch | Sample_ID == "GSM1944944"),
+                    aes(chrX_nInt,chrY_nInt, label=Sample_ID),
+                    show.legend = FALSE,
+                    min.segment.length = 0)+
+  geom_hline(yintercept = Y_int)+
+  geom_vline(xintercept = X_int)
+
+#Iciar also caught GSM2759051 and observed that GSM1944944 had irregular XIST methylation
+#I see that it has slightly lower XIST methylation than other XY samples
+
+## Sex check with XIST probes mean methylation
+betas_raw <- getBeta(mset)
+
+#select xist probes differentially methylated by sex
+xist_probes <- chrXprobes %>% filter(probeID %in% c("cg03554089", "cg05533223", "cg11717280", "cg12653510", "cg20698282", "cg03862022", "cg23828566"))
+dim(xist_probes) #5
+betas_xist<- colMeans(betas_raw[rownames(betas_raw) %in% xist_probes$probeID, ])
+pDat_disc <- pDat_disc %>% mutate(mean_beta_xist = betas_xist)
+
+# plot sex chromosome intensity vs XIST beta values
+pDat_disc %>%
+  ggplot(aes(y=mean_beta_xist, x=chrX_nInt, color=Sex)) + 
+  geom_point(size=3, alpha=0.4) +
+  geom_vline(xintercept=X_int) +
+  labs(title="Normalized X Intensity vs. Mean XIST DNAme",
+       y="Mean XIST Beta",
+       x="Normalized chrX/mean Autosomal Intensity",
+       color="Reported Sex") +
+  theme_bw()+
+  theme(plot.title= element_text(hjust=0.5))+
+  scale_color_manual(values=c("#5647B2","#47B25E"),labels = c("XX","XY"))+
+  geom_label_repel (data = pDat_disc %>%
+                    filter(Sex_mismatch |Sample_ID == "GSM1944944"|
+                             mean_beta_xist<0.75 & mean_beta_xist>0.65),
+                    aes(y=mean_beta_xist, x=chrX_nInt, label=Sample_ID),
+                    show.legend = FALSE,
+                    min.segment.length = 0)
+
+pDat_disc %>%
+  ggplot(aes(y=mean_beta_xist, x=chrX_nInt, color=GEO_Dataset)) + 
+  geom_point(size=3, alpha=0.4) +
+  geom_vline(xintercept=X_int) +
+  labs(title="Normalized X Intensity vs. Mean XIST DNAme",
+       y="Mean XIST Beta",
+       x="Normalized chrX/mean Autosomal Intensity",
+       color="Dataset") +
+  theme_bw()+
+  theme(plot.title= element_text(hjust=0.5))+
+  geom_label_repel (data = pDat_disc %>%
+                    filter(Sex_mismatch | Sample_ID == "GSM1944944"|
+                             mean_beta_xist<0.75 & mean_beta_xist>0.65|
+                             chrX_nInt <1.01 & chrX_nInt>0.9),
+                    aes(y=mean_beta_xist, x=chrX_nInt, label=Sample_ID),
+                    show.legend = FALSE,
+                    min.segment.length = 0)
+
+pDat_disc %>%
+  ggplot(aes(y=mean_beta_xist, x=chrY_nInt, color=Sex)) + 
+  geom_point(size=3, alpha=0.4) +
+  geom_vline(xintercept=Y_int) +
+  labs(title="Normalized Y Intensity vs. Mean XIST DNAme",
+       y="Mean XIST Beta",
+       x="Normalized chrY/mean Autosomal Intensity",
+       color="Reported Sex") +
+  theme_bw()+
+  theme(plot.title= element_text(hjust=0.5))+
+  scale_color_manual(values=c("#5647B2","#47B25E"),labels = c("XX","XY"))+
+  geom_label_repel (data = pDat_disc %>%
+                    filter(Sex_mismatch | Sample_ID == "GSM1944944"|
+                             mean_beta_xist<0.75 & mean_beta_xist>0.65),
+                    aes(y=mean_beta_xist, x=chrY_nInt, label=Sample_ID),
+                    show.legend = FALSE,
+                    min.segment.length = 0)
+
+#reduce memory space by removing large objects
+remove(meth)
+remove(unmeth)
+
+pDat_disc <- pDat_disc %>%
+  mutate(Failed_sex = ifelse(Sex_mismatch, TRUE, ifelse(Sample_ID %in% c(
+    "GSM1944944","GSM2759051","GSM1892060","GSM1892055","GSM1892047","GSM1892059",
+    "GSM1892052","GSM1892053","GSM1892051","GSM1892058"), TRUE, FALSE)))
+
+table(pDat_disc$Failed_sex)
+
+```
+
+### 2.4 Intersample Correlation
+
+```{r inter-sample-cor}
+
+#calculate the correlation between the samples before normalization
+cor_betas <- cor(na.omit(betas_raw))
+
+pDat_disc <- pDat_disc %>% mutate(med_IntersampleCorr_Beta_raw = colMedians(cor_betas))
+
+pDat_disc %>%
+  ggplot(aes(x=Sample_ID, y=med_IntersampleCorr_Beta_raw, fill=GEO_Dataset)) +
+  geom_point(shape=21, size=2.5) +
+  geom_hline(yintercept = 0.95, color="darkgrey")+
+  labs(title="Median Intersample Correlation (all Beta values)",
+       x = "Sample ID") +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position="none")+
+  geom_label_repel(data=(pDat_disc %>%
+                           filter(med_IntersampleCorr_Beta_raw <0.951)),
+                   aes(x=Sample_ID, y=med_IntersampleCorr_Beta_raw, label=Sample_ID),
+                   nudge_x=0.3)
+
+pDat_disc %>%
+  ggplot(aes(x=GEO_Dataset, y=med_IntersampleCorr_Beta_raw, fill=GEO_Dataset)) +
+  geom_point(shape=21, size=2.5, position = position_jitterdodge()) +
+  geom_hline(yintercept = 0.95, color="darkgrey")+
+  geom_boxplot(alpha=0.25, outlier.shape=NA)+
+  labs(title="Median Intersample Correlation (all Beta values)",
+       x = "Dataset") +
+  theme_bw() +
+  theme(legend.position="none")
+
+pDat_disc <- pDat_disc %>% mutate(Failed_correlation = ifelse(med_IntersampleCorr_Beta_raw<0.951,T,F))
+
+```
+
+
+
+### 2.6 Cell composition
+
+```{r cell-comp}
+
+betas_bmiq <- wateRmelon::BMIQ(mset) #bmiq normalize for PlaNET
+all.equal(colnames(betas_bmiq),pDat_disc$Sample_ID) #T
+
+saveRDS(betas_bmiq, here::here("02_Outputs/01_450K_Proc/betas_bmiq.RDS"))
+
+data(plCellCpGsThird)
+
+epidish_RPC <- epidish(
+    beta.m = betas_bmiq[rownames(plCellCpGsThird), ],
+    ref.m = plCellCpGsThird,
+    method = "RPC"
+)
+
+pDat_disc <- pDat_disc %>%
+  left_join(epidish_RPC$estF %>% 
+              as.data.frame() %>%
+              rownames_to_column(., var="Sample_ID"))%>%
+  mutate(CTB_STB = Trophoblasts/Syncytiotrophoblast) 
+
+pDat_disc %>% 
+  mutate(Sample_order = as.factor(Syncytiotrophoblast))%>%
+  dplyr::rename(CTB = Trophoblasts,
+                STB = Syncytiotrophoblast) %>%
+  pivot_longer(cols=c(CTB,
+                      STB,
+                      Hofbauer,
+                      Endothelial,
+                      nRBC,
+                      Stromal),
+               names_to = "Cell_Type", values_to="Estimate") %>%
+  mutate(Cell_Type = factor(Cell_Type,
+                            levels=c("nRBC", "Endothelial", "Hofbauer",
+                                     "Stromal", "CTB", "STB"))) %>%
+  ggplot(aes(x=Sample_order, y=Estimate, color=Cell_Type, fill=Cell_Type)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(limits=c(-0.1,1.1))+
+  coord_cartesian(ylim= c(0,1)) +  # tighten limits of plot
+  labs(x="Sample",
+       color = "Cell-type",
+       fill = "Cell-type",
+       title = "PlaNET Cell Estimates") +
+  scale_fill_manual(values=c("grey","#6A1B9A","#1565C0","#388E3C","#FBC02D","#F4702E"))+
+  scale_color_manual(values = c("grey","#6A1B9A","#1565C0","#388E3C","#FBC02D","#F4702E"))+
+  theme_minimal(base_size=13) +
+  theme(
+    axis.text.x=element_blank(),
+    axis.ticks.x=element_blank(),
+    plot.title = element_text(hjust=0.5),
+    legend.position = "bottom")
+
+```
+
+### 2.7 eoPRED score
+
+```{r eopred-scores}
+
+predictPreeclampsia <- readRDS(here::here("02_Outputs/eoPRED_function.RDS"))
+
+t_betas_bmiq <- t(betas_bmiq)
+
+eoPRED_results <- predictPreeclampsia(t_betas_bmiq)
+
+pDat_disc <- pDat_disc %>% left_join(eoPRED_results, by="Sample_ID")
+table(pDat_disc$PE_Status, pDat_disc$Condition)
+
+pDat_disc %>%
+  ggplot(aes(x=EOPE))+
+  geom_density()
+
+pDat_disc %>% 
+  ggplot(aes(x=Condition, y=EOPE))+
+  geom_point()+
+  geom_boxplot(alpha=0.25, outlier.shape=NA)
+
+```
+
+### 2.8 Sample Filtering
+
+-   Remove replicates (n=8)
+-   Remove mismatched sex (n=3)
+-   Below 2 SD on total intensity (n=8)
+-   Irregular X/Y fluorescence or XIST methylation (n=4)
+-   Intersample correlation <0.95 (n=2) - they also all had high contamination
+
+```{r sample-filtering}
+
+#are there samples that failed multiple of the QC checks?
+table(pDat_disc$Failed_contam, pDat_disc$Failed_correlation) #5
+table(pDat_disc$Failed_intensity, pDat_disc$Failed_totalintensity) #9 total
+
+dim(pDat_disc) #379
+pDat_filt <- pDat_disc %>%
+  filter(!Condition == "Replicate"&
+           !Sex_mismatch == TRUE &
+           !Failed_sex == TRUE &
+           !Failed_totalintensity == TRUE &
+           !Failed_correlation)
+
+dim(pDat_filt) #354 samples after QC
+mset_filt <- mset[,pDat_filt$Sample_ID]
+dim(mset_filt) #485512 x 354
+
+table(pDat_disc$GEO_Dataset)
+table(pDat_filt$GEO_Dataset)
+table(pDat_filt$GEO_Dataset, pDat_filt$Condition)
+
+
+```
+
+## 3.0 Normalization
+
+
+```{r adj-das}
+
+ann <- data.frame(getAnnotation(mset_filt), stringsAsFactors = F)
+ann$DESIGN <- ann$Type
+dim(ann) #485512 x 34
+
+#we need to create a methylumiset object using the annotation
+mlumi_raw <- as.methylumi (mn = getMeth(mset_filt),
+                           un = getUnmeth(mset_filt),
+                           bn = getBeta(mset_filt),
+                           pv = NULL,
+                           qc = NULL,
+                           da = ann)
+class(mlumi_raw) #MethyLumiSet
+
+
+betas_adjdas <- wateRmelon::adjustedDasen(mns = methylated(mlumi_raw),
+                                          uns = unmethylated(mlumi_raw),
+                                          onetwo = fData(mlumi_raw)[,fot(mlumi_raw)],
+                                          chr = fData(mlumi_raw)$chr)
+
+dim(betas_adjdas)
+class(betas_adjdas) #data.frame
+betas_adjdas[1:3,1:3]
+sum(is.na(betas_adjdas))
+
+```
+
+## 4.0 Probe Filtering
+
+-   genotyping (SNP probes already removed)
+-   polymorphic and cross-hybridizing probes
+-   poor quality probes (detection p-value> 0.01 in >=5% of samples, Y chromosome evaluated in males only)
+-   additional poor X chr probes identified by Inkster et al. 2023 (Who's Afraid of the X)
+
+### 4.1 Polymorphic & Cross-hybridizing
+
+With 450k the best resource for this step is the [annotation](https://zwdzwd.github.io/InfiniumAnnotation) from the Zhou et al. team.
+
+Based on how their annotation is structured they have a single column that removes both polymorphic and cross-hybridizing probes at the same time. This is captured in the `MASK_general` column.
+
+```{r read-in-zhou-objects}
+
+# read in the zhou annotation object (downloaded from their github website)
+zhouAnno <- read.delim("//fs/teams/RobinsonLab/Hannah/01_Rotation & Maternal Age Project/C. Maternal Age Project/00_Data/HM450.hg38.mask.tsv.gz")
+dim(zhouAnno) #485577
+
+zhou_maskgeneral <- zhouAnno %>% filter(zhouAnno$MASK_general)
+dim(zhou_maskgeneral) #64144 probes removed with MASK_general
+
+# now let's actually remove those probes
+dim(betas_adjdas) #485512 
+betas_adjdas_filt <- betas_adjdas[!(rownames(betas_adjdas) %in% zhou_maskgeneral$probeID), ]
+dim(betas_adjdas_filt) #421368 
+
+```
+
+### 4.2 DetP
+
+```{r bad-probes}
+
+#load the detP matrix
+detp_all <- readRDS(paste0(iciar_data_path,"detp.RDS"))
+dim(detp_all) #485512 x 401
+
+detp <- detp_all [,pDat_filt$Sample_ID]
+dim(detp)
+
+# rather than actually sex-stratifying for the detP probes I am going to change 
+# all the female Y chromosome values to 0 so that they aren't considered for detP removal 
+pDat_f <- pDat_filt %>% filter(Sex == "Female")
+
+f_detP <- detp #make an object where we will modifty the detP value in females 
+f_detP[rownames(f_detP) %in% chrYprobes$probeID, colnames(f_detP) %in% pDat_f$Sample_ID] <- 0
+femaleYdetP <- f_detP[rownames(f_detP) %in% chrYprobes$probeID, colnames(f_detP) %in% pDat_f$Sample_ID]
+all(femaleYdetP == 0) #check this step worked
+dim(femaleYdetP)
+failed_detP <- f_detP > 0.01 #get a matrix of how many probes failed detP
+
+betas_raw <- betas_raw[,pDat_filt$Sample_ID]
+
+# create an logical matrix with which probes failed a check (true = fail)
+# sum to see if a probe failed any checks (false + false = 0)
+failed_probes <- failed_detP + is.na(betas_raw) 
+failed_probes <- failed_probes > 0 # >0 means failed any of the checks
+
+table(rowSums(failed_probes) >= (ncol(failed_probes)*0.05)) #626 probes to remove
+
+# index them for removal
+badprobes <- data.frame(probebad <- rowSums(failed_probes) >= ncol(failed_probes)*0.05) %>%
+  filter(probebad == TRUE)
+dim(badprobes) #626
+
+## Remove the probes from the betas object
+table(row.names(betas_adjdas_filt) %in% rownames(badprobes))
+betas_adjdas_filt <- betas_adjdas_filt[!(row.names(betas_adjdas_filt) %in% rownames(badprobes)),]
+dim(betas_adjdas_filt) #421210
+
+# Total number of probes that failed for each sample
+Total_failed_probes <- colSums(failed_probes)
+identical(names(Total_failed_probes), pDat_filt$Sample_ID) #check
+pDat_filt <- pDat_filt %>% mutate(Total_failed_probes = Total_failed_probes) #add to sample sheet
+summary(pDat_filt$Total_failed_probes)
+
+pDat_filt %>%
+  ggplot(aes(x=Sample_ID, y=Total_failed_probes, fill=GEO_Dataset)) +
+  geom_point(shape=21, size=2.5) +
+  geom_hline(yintercept = nrow(failed_probes)*0.01, color="darkgrey")+
+  labs(title="Total Failed Probes)",
+       x = "Sample ID") +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position="right")
+
+# identify samples with > 1% failed detP probes
+table(colSums(detp>0.01) > nrow(detp)*0.01) #none
+table(colSums(failed_probes) > nrow(failed_probes)*0.01) #none
+
+```
+
+### 4.3 Additional X/Y Probes
+
+Inkster et al. 2023 identified additional probes on the X and Y that should be removed from analysis because they overlapped with the XTR, repetitive elements, or were in cancer testis gene promoters. Here I will remove those probes.
+
+```{r bad-x-y-probes}
+
+#load additional X and Y annotation info
+chrXY_ext <- read.csv("//fs/teams/RobinsonLab/Hannah/05_Projects/SPAH/B. Data/B. Reference Data/Inkster_extended_XY_probe_annotation.csv",header = T, fileEncoding="UTF-8-BOM")
+
+bad_xy_probes <- chrXY_ext %>% filter(MASK_X_transposed_region == TRUE |
+                                        MASK_AnyRepetitive == TRUE)
+dim(bad_xy_probes) #726
+
+table(rownames(betas_adjdas_filt) %in% bad_xy_probes$probeID) #520
+
+#remove probes
+betas_adjdas_filt <- betas_adjdas_filt [!(rownames(betas_adjdas_filt) %in% bad_xy_probes$probeID),]
+dim(betas_adjdas_filt) #420690 probes
+
+table(rownames(betas_adjdas_filt) %in% autoProbes$probeID) #411254
+table(rownames(betas_adjdas_filt) %in% chrXprobes$probeID) #9210
+table(rownames(betas_adjdas_filt) %in% chrYprobes$probeID) #226
+
+```
+
+## 5.0 Save Objects & Conclusion
+
+We ended up with 354 placentas and 420,381 probes (n=8895 chrX, n=226 chrY). In the CNV script I checked for CNVs using conumee and removed two additional samples. In the next scripts I will perform PCA, look for associations with sex in this dataset, and look for DNAme on the X and Y associated with eoPRED score.  
+
+```{r save}
+
+saveRDS(pDat_disc, here::here("02_Outputs/01_450K_Proc/pDat_disc.RDS"))
+saveRDS(pDat_filt, here::here("02_Outputs/01_450K_Proc/pDat_filt.RDS"))
+saveRDS(betas_adjdas, here::here("02_Outputs/01_450K_Proc/betas_adjdas.RDS"))
+saveRDS(betas_adjdas_filt, here::here("02_Outputs/01_450K_Proc/betas_adjdas_filt.RDS"))
+
+```

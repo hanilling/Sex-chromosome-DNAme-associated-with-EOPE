@@ -1,0 +1,182 @@
+---
+title: "EOPE & Sex Project - Processing of SPAH Cohort"
+author: "Hannah Illing"
+date: "`r format(Sys.time(), '%Y %B %d')`"
+#Date created: 2025,02,10
+output: 
+  html_document:
+    keep_md: yes
+    toc: true  
+    toc_depth: 4
+    toc_float: 
+      collapsed: true 
+      smooth_scroll: true
+---
+
+## 1.0 Introduction
+
+The goal of this project is to identify eoPRED score associations with sex chromosome DNA methylation. I will use two datasets of placentas. In this script I re-process the samples in the SPAH cohort so that the processing will match with the 450K Dataset. 
+
+NOTE: When I first wrote these scripts I called the 450K Dataset the 'Discovery Cohort' and the SPAH Dataset the 'Validation Cohort'. You may still see objects named this way.
+
+### 1.1 Packages
+
+```{r packages, warning=F, message=F}
+
+library(here)
+library(tidyverse)
+
+#load the probe information
+probeInfo <- readRDS("//fs/teams/RobinsonLab/Hannah/05_Projects/SPAH/E. Sex and Environment Project [abandon]/02_Outputs/02_Variability/hg38_b5_EPIC_probeinfo.rds")
+probeInfo <- probeInfo %>% mutate(Start_hg38 = as.numeric(Start_hg38))
+
+chrXprobes <- probeInfo %>% filter(chr == "chrX")
+chrYprobes <- probeInfo %>% filter(chr == "chrY")
+autoProbes <- probeInfo %>% filter(!(chr %in% c("chrX", "chrY")))
+
+set.seed(4815)
+
+```
+
+### 1.2 Data
+
+```{r data}
+
+spah_path <- "//fs/teams/RobinsonLab/Hannah/05_Projects/SPAH/"
+
+metadata <- readRDS(paste0(spah_path,"C. Processing/02_Outputs/01_QC_Preprocessing/SPAH_metadata_ss_filtered.rds"))
+dim(metadata) #493 x 162
+
+metadata <- metadata %>%
+  mutate(Sex_Predic = as.factor(Sex_Predic)) 
+
+```
+
+## 2.0 Normalization
+
+Performed previously for pathology project.
+
+```{r betas-adj-das}
+
+betas_adjdas <- readRDS(paste0(spah_path,"C. Processing/02_Outputs/03_XY_Processing/betas_adjdas.rds"))
+dim(betas_adjdas) #865859 x 496
+
+#filter to 493 samples
+betas_adjdas <- betas_adjdas[, metadata$rgset_colnames]
+dim(betas_adjdas) #865859 x 493
+
+```
+
+## 3.0 Probe Filtering
+
+### 3.1 B5 Manifest
+
+```{r b5-manifest}
+
+#remove the bad b4 probes labeled in the MFG_Change_Flagged column
+probeInfo_b5 <- probeInfo %>% filter(!MFG_Change_Flagged ==TRUE)
+dim(probeInfo_b5) #864869  
+
+table(rownames(betas_adjdas) %in% probeInfo_b5$probeID)
+b5_probes <- rownames(betas_adjdas) %in% probeInfo_b5$probeID
+betas_adjdas <- betas_adjdas[b5_probes,] 
+dim(betas_adjdas) #864869
+
+```
+
+### 3.2 Polymorphic & Cross-hybridizing
+
+```{r non-specific-probes}
+
+#read in the zhou mask object
+zhou_mask <- read.delim(paste0(spah_path,"B. Data/B. Reference Data/EPIC.hg38.mask.tsv.gz")) #newer masking info
+dim(zhou_mask) #865918
+
+zhou_maskgeneral <- zhou_mask %>% filter(MASK_general) #save the MASK_general probes in a new object
+dim(zhou_maskgeneral) #105454
+
+table(rownames(betas_adjdas) %in% zhou_maskgeneral$probeID) #105303 to remove
+
+betas_adjdas<- betas_adjdas[!(rownames(betas_adjdas) %in% zhou_maskgeneral$probeID),]
+dim(betas_adjdas) #759566 probes
+
+```
+
+### 3.3 DetP
+
+```{r detp}
+
+detP <- readRDS(paste0(spah_path,"C. Processing/02_Outputs/01_QC_Preprocessing/detP.rds"))
+dim(detP) #864869 x 510
+
+detP <- detP [, metadata$rgset_colnames]
+dim(detP) #x493
+
+# rather than actually sex-stratifying for the detP probes I am going to change 
+# all the female Y chromosome values to 0 so that they aren't considered for detP removal 
+metadata_f <- metadata %>% filter(Sex_Predic == "XX")
+
+f_detP <- detP #make an object where we will modifty the detP value in females 
+f_detP[rownames(f_detP) %in% chrYprobes$probeID, colnames(f_detP) %in% metadata_f$rgset_colnames] <- 0
+femaleYdetP <- f_detP[rownames(f_detP) %in% chrYprobes$probeID, colnames(f_detP) %in% metadata_f$rgset_colnames]
+dim(femaleYdetP)
+all(femaleYdetP == 0) #check this step worked
+
+failed_detP <- f_detP > 0.01 #get a matrix of how many probes failed detP
+failed_detP <- failed_detP [rownames(betas_adjdas),]
+
+# create an logical matrix with which probes failed a check (true = fail)
+# sum to see if a probe failed any checks (false + false = 0)
+failed_probes <- failed_detP + is.na(betas_adjdas) 
+failed_probes <- failed_probes > 0 # >0 means failed any of the checks
+
+table(rowSums(failed_probes) >= (ncol(failed_probes)*0.05)) #1152 probes to remove
+
+# index them for removal
+badprobes <- data.frame(probebad <- rowSums(failed_probes) >= ncol(failed_probes)*0.05) %>%
+  filter(probebad == TRUE)
+dim(badprobes) #1152
+
+## Remove the probes from the betas object
+table(row.names(betas_adjdas) %in% rownames(badprobes))
+betas_adjdas <- betas_adjdas[!(row.names(betas_adjdas) %in% rownames(badprobes)),]
+dim(betas_adjdas) #758414
+
+```
+
+### 3.4 Additional X/Y Probes
+
+Inkster et al. 2023 identified additional probes on the X and Y that should be removed from analysis because they overlapped with the XTR, repetitive elements, or were in cancer testis gene promoters. Here I will remove those probes.
+
+```{r bad-x-y-probes}
+
+#load additional X and Y annotation info
+chrXY_ext <- read.csv(paste0(spah_path,"B. Data/B. Reference Data/Inkster_extended_XY_probe_annotation.csv"),header = T, fileEncoding="UTF-8-BOM")
+
+bad_xy_probes <- chrXY_ext %>% filter(MASK_X_transposed_region == TRUE |
+                                        MASK_AnyRepetitive == TRUE)
+dim(bad_xy_probes) #726
+
+table(rownames(betas_adjdas) %in% bad_xy_probes$probeID) #481
+
+#remove probes
+betas_adjdas <- betas_adjdas [!(rownames(betas_adjdas) %in% bad_xy_probes$probeID),]
+dim(betas_adjdas) #757933 probes
+
+table(rownames(betas_adjdas) %in% autoProbes$probeID) #741574 
+table(rownames(betas_adjdas) %in% chrXprobes$probeID) #16070
+table(rownames(betas_adjdas) %in% chrYprobes$probeID) #289 
+
+```
+
+## 5.0 Save Objects & Conclusion
+
+We ended up with 493 placentas and 757,659 probes (n=15,796 chrX, n=289 chrY). In the next script I will perform PCA, look for associations with sex in this dataset, and look for DNAme on the X and Y associated with eoPRED score.
+
+```{r save}
+
+saveRDS(betas_adjdas, here::here("02_Outputs/02_SPAH_Proc/val_cohort_betas_adjdas.RDS"))
+saveRDS(metadata, here::here("02_Outputs/02_SPAH_Proc/val_cohort_metadata.RDS"))
+
+```
+
