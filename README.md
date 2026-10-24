@@ -1,8 +1,14 @@
-# Sex chromosome DNA methylation associated with early onset preeclampsia
-This respository contains code from the paper "Sex-linked placental DNA methylation associated with early-onset preeclampsia". It was the first study to investigate and identify an association between early-onset preeclampsia (EOPE) and X and Y chromosome DNA methylation in the placenta. 
+# X and Y DNA methylation associated with early onset preeclampsia
+This respository contains code from the paper **Sex-linked placental DNA methylation associated with early-onset preeclampsia** (Biology of Sex Differences, 2026). It was the first study to investigate and identify an association between early-onset preeclampsia (EOPE) and X and Y chromosome placental DNA methylation. 
 
-We used DNA methylation data from 843 placentas (XX=386, XY=457) in publicly available datasets. The datasets are available on GEO: GSE307289, GSE100197, GSE103253, GSE98224, GSE57767, GSE125605, GSE73375, and GSE75196.
-
-Code pertaining to the initial processing of the SPAH dataset (GSE307289) can be found [here](https://github.com/hanilling/DNA_methylation_profiling_of_placental_histopathology-).
+We used DNA methylation data from 843 placentas (XX=386, XY=457) in publicly available datasets. 
 
 The function to calculate **eoPRED score** is available in the [PlaNET R package](https://doi.org/doi:10.18129/B9.bioc.pla)
+
+### Code Files:
+- **01_SexEOPE_450K_Proc** - probe filtering, normalization, probe filtering, removing poor quality samples for the 450K dataset
+- **02_SexEOPE_SPAH_Proc** - probe filtering, normalization, probe filtering, removing poor quality samples for the SPAH dataset
+- **03_SexEOPE_PCA_and_Demographics** - PCA and demographics (Table 2) for both datasets
+- **04_SexEOPE_450K_EWAS** - linear modelling DNAme~EOPE and DNAme~eoPRED for the sex chromosomes in the 450K dataset (Figures 1 & 2)
+- **05_SexEOPE_SPAH_EWAS** - linear modelling DNAme~eoPRED score for the sex chromosomes in the SPAH dataset (Figure 3)
+- **06_SexEOPE_Cohort_Comparison** - comparing the linear modelling results between datasets (Table 4)
