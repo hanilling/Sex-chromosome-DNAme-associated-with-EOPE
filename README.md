@@ -1,5 +1,5 @@
 # X and Y DNA methylation associated with early onset preeclampsia
-This respository contains code from the paper **Sex-linked placental DNA methylation associated with early-onset preeclampsia** (Biology of Sex Differences, 2026). It was the first study to investigate and identify an association between early-onset preeclampsia (EOPE) and X and Y chromosome placental DNA methylation. 
+This respository contains code from the paper [**Sex-linked placental DNA methylation associated with early-onset preeclampsia**](https://doi.org/10.1186/s13293-026-01005-5) (Biology of Sex Differences, 2026). It was the first study to investigate and identify an association between early-onset preeclampsia (EOPE) and X and Y chromosome placental DNA methylation. 
 
 <img width="1394" height="779" alt="Slide 1" src="https://github.com/user-attachments/assets/457ad6f2-90e5-494a-8f82-a5a89be69a9a" />
 
