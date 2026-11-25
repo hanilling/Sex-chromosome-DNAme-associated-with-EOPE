@@ -10,6 +10,6 @@ The function to calculate **eoPRED score** is available in the [PlaNET R package
 - **01_SexEOPE_450K_Proc** - probe filtering, normalization, probe filtering, removing poor quality samples for the 450K dataset
 - **02_SexEOPE_SPAH_Proc** - probe filtering, normalization, probe filtering, removing poor quality samples for the SPAH dataset
 - **03_SexEOPE_PCA_and_Demographics** - PCA and demographics (Table 2) for both datasets
-- **04_SexEOPE_450K_EWAS** - linear modelling DNAme~EOPE and DNAme~eoPRED for the sex chromosomes in the 450K dataset (Figures 1 & 2)
-- **05_SexEOPE_SPAH_EWAS** - linear modelling DNAme~eoPRED score for the sex chromosomes in the SPAH dataset (Figure 3)
+- **04_SexEOPE_450K_EWAS** - linear modelling with EOPE and eoPRED score for the sex chromosomes in the 450K dataset (Figures 1 & 2)
+- **05_SexEOPE_SPAH_EWAS** - linear modelling with eoPRED score for the sex chromosomes in the SPAH dataset (Figure 3)
 - **06_SexEOPE_Cohort_Comparison** - comparing the linear modelling results between datasets (Table 4)
